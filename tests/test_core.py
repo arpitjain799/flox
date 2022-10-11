@@ -194,8 +194,9 @@ def test_groupby_reduce_all(nby, size, chunks, func, add_nan_by, engine):
         flox_kwargs = dict(func=func, engine=engine, finalize_kwargs=kwargs, fill_value=fill_value)
         with np.errstate(invalid="ignore", divide="ignore"):
             if "arg" in func and add_nan_by:
+                func_ = f"nan{func}" if "nan" not in func else func
                 array[..., nanmask] = np.nan
-                expected = getattr(np, "nan" + func)(array, axis=-1, **kwargs)
+                expected = getattr(np, func_)(array, axis=-1, **kwargs)
             else:
                 expected = getattr(np, func)(array[..., ~nanmask], axis=-1, **kwargs)
         for _ in range(nby):
