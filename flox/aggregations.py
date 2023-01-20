@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import warnings
 from functools import partial
 
 import numpy as np
@@ -39,7 +40,7 @@ def generic_aggregate(
             method_ = getattr(aggregate_npg, func)
             method = partial(method_, engine=engine)
         except AttributeError:
-            aggregate = npg.aggregate_np if engine == "numpy" else npg.aggregate_nb
+            aggregate = aggregate_npg._get_aggregate(engine).aggregate
             method = partial(aggregate, func=func)
     else:
         raise ValueError(
@@ -48,17 +49,17 @@ def generic_aggregate(
 
     group_idx = np.asarray(group_idx, like=array)
 
-    return method(
-        group_idx, array, axis=axis, size=size, fill_value=fill_value, dtype=dtype, **kwargs
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", r"All-NaN (slice|axis) encountered")
+        result = method(
+            group_idx, array, axis=axis, size=size, fill_value=fill_value, dtype=dtype, **kwargs
+        )
+    return result
 
 
 def _normalize_dtype(dtype, array_dtype, fill_value=None):
     if dtype is None:
-        if fill_value is not None and np.isnan(fill_value):
-            dtype = np.floating
-        else:
-            dtype = array_dtype
+        dtype = array_dtype
     if dtype is np.floating:
         # mean, std, var always result in floating
         # but we preserve the array's dtype if it is floating
@@ -68,6 +69,8 @@ def _normalize_dtype(dtype, array_dtype, fill_value=None):
             dtype = np.dtype("float64")
     elif not isinstance(dtype, np.dtype):
         dtype = np.dtype(dtype)
+    if fill_value not in [None, dtypes.INF, dtypes.NINF, dtypes.NA]:
+        dtype = np.result_type(dtype, fill_value)
     return dtype
 
 
@@ -244,11 +247,18 @@ nanprod = Aggregation(
     fill_value=1,
     final_fill_value=dtypes.NA,
 )
+
+
+def _mean_finalize(sum_, count):
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return sum_ / count
+
+
 mean = Aggregation(
     "mean",
     chunk=("sum", "nanlen"),
     combine=("sum", "sum"),
-    finalize=lambda sum_, count: sum_ / count,
+    finalize=_mean_finalize,
     fill_value=(0, 0),
     dtypes=(None, np.uintp),
     final_dtype=np.floating,
@@ -257,7 +267,7 @@ nanmean = Aggregation(
     "nanmean",
     chunk=("nansum", "nanlen"),
     combine=("sum", "sum"),
-    finalize=lambda sum_, count: sum_ / count,
+    finalize=_mean_finalize,
     fill_value=(0, 0),
     dtypes=(None, np.uintp),
     final_dtype=np.floating,
@@ -266,7 +276,8 @@ nanmean = Aggregation(
 
 # TODO: fix this for complex numbers
 def _var_finalize(sumsq, sum_, count, ddof=0):
-    result = (sumsq - (sum_**2 / count)) / (count - ddof)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result = (sumsq - (sum_**2 / count)) / (count - ddof)
     result[count <= ddof] = np.nan
     return result
 
@@ -353,6 +364,10 @@ def argreduce_preprocess(array, axis):
     )
 
 
+def _pick_second(*x):
+    return x[1]
+
+
 argmax = Aggregation(
     "argmax",
     preprocess=argreduce_preprocess,
@@ -361,7 +376,7 @@ argmax = Aggregation(
     reduction_type="argreduce",
     fill_value=(dtypes.NINF, 0),
     final_fill_value=-1,
-    finalize=lambda *x: x[1],
+    finalize=_pick_second,
     dtypes=(None, np.uintp),
     final_dtype=np.uintp,
 )
@@ -374,7 +389,7 @@ argmin = Aggregation(
     reduction_type="argreduce",
     fill_value=(dtypes.INF, 0),
     final_fill_value=-1,
-    finalize=lambda *x: x[1],
+    finalize=_pick_second,
     dtypes=(None, np.uintp),
     final_dtype=np.uintp,
 )
@@ -387,7 +402,7 @@ nanargmax = Aggregation(
     reduction_type="argreduce",
     fill_value=(dtypes.NINF, -1),
     final_fill_value=-1,
-    finalize=lambda *x: x[1],
+    finalize=_pick_second,
     dtypes=(None, np.uintp),
     final_dtype=np.uintp,
 )
@@ -400,7 +415,7 @@ nanargmin = Aggregation(
     reduction_type="argreduce",
     fill_value=(dtypes.INF, -1),
     final_fill_value=-1,
-    finalize=lambda *x: x[1],
+    finalize=_pick_second,
     dtypes=(None, np.uintp),
     final_dtype=np.uintp,
 )
@@ -465,9 +480,10 @@ aggregations = {
 
 def _initialize_aggregation(
     func: str | Aggregation,
+    dtype,
     array_dtype,
     fill_value,
-    min_count: int,
+    min_count: int | None,
     finalize_kwargs,
 ) -> Aggregation:
     if not isinstance(func, Aggregation):
@@ -484,10 +500,18 @@ def _initialize_aggregation(
     else:
         raise ValueError("Bad type for func. Expected str or Aggregation")
 
-    agg.dtype[func] = _normalize_dtype(agg.dtype[func], array_dtype, fill_value)
+    # np.dtype(None) == np.dtype("float64")!!!
+    # so check for not None
+    if dtype is not None and not isinstance(dtype, np.dtype):
+        dtype = np.dtype(dtype)
+
+    agg.dtype[func] = _normalize_dtype(dtype or agg.dtype[func], array_dtype, fill_value)
     agg.dtype["numpy"] = (agg.dtype[func],)
     agg.dtype["intermediate"] = [
-        _normalize_dtype(dtype, array_dtype) for dtype in agg.dtype["intermediate"]
+        _normalize_dtype(int_dtype, np.result_type(array_dtype, agg.dtype[func]), int_fv)
+        if int_dtype is None
+        else int_dtype
+        for int_dtype, int_fv in zip(agg.dtype["intermediate"], agg.fill_value["intermediate"])
     ]
 
     # Replace sentinel fill values according to dtype

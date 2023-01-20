@@ -30,6 +30,21 @@ def _prepare_for_flox(group_idx, array):
     return group_idx, ordered_array
 
 
+def _prepare_for_flox(group_idx, array):
+    """
+    Sort the input array once to save time.
+    """
+    assert array.shape[-1] == group_idx.shape[0]
+    issorted = (group_idx[:-1] <= group_idx[1:]).all()
+    if issorted:
+        ordered_array = array
+    else:
+        perm = group_idx.argsort(kind="stable")
+        group_idx = group_idx[..., perm]
+        ordered_array = array[..., perm]
+    return group_idx, ordered_array
+
+
 def _np_grouped_op(group_idx, array, op, axis=-1, size=None, fill_value=None, dtype=None, out=None):
     """
     most of this code is from shoyer's gist
@@ -124,7 +139,8 @@ def mean(group_idx, array, *, axis=-1, size=None, fill_value=None, dtype=None):
     if fill_value is None:
         fill_value = 0
     out = sum(group_idx, array, axis=axis, size=size, dtype=dtype, fill_value=fill_value)
-    out /= nanlen(group_idx, array, size=size, axis=axis, fill_value=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out /= nanlen(group_idx, array, size=size, axis=axis, fill_value=0)
     return out
 
 
@@ -132,5 +148,6 @@ def nanmean(group_idx, array, *, axis=-1, size=None, fill_value=None, dtype=None
     if fill_value is None:
         fill_value = 0
     out = nansum(group_idx, array, size=size, axis=axis, dtype=dtype, fill_value=fill_value)
-    out /= nanlen(group_idx, array, size=size, axis=axis, fill_value=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out /= nanlen(group_idx, array, size=size, axis=axis, fill_value=0)
     return out
