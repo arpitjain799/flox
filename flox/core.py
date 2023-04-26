@@ -1798,6 +1798,7 @@ def groupby_reduce(
     nby = len(bys)
     by_is_dask = tuple(is_duck_dask_array(b) for b in bys)
     any_by_dask = any(by_is_dask)
+    provided_expected = expected_groups is not None
 
     if method in ["split-reduce", "cohorts"] and any_by_dask:
         raise ValueError(f"method={method!r} can only be used when grouping by numpy arrays.")
@@ -1890,15 +1891,21 @@ def groupby_reduce(
     # When axis is a subset of possible values; then npg will
     # apply it to groups that don't exist along a particular axis (for e.g.)
     # since these count as a group that is absent. thoo!
-    # fill_value applies to all-NaN groups as well as labels in expected_groups that are not found.
+    # fill_value applies to all-NaN groups as well as
+    # labels in expected_groups that are not found.
     #     The only way to do this consistently is mask out using min_count
     #     Consider np.sum([np.nan]) = np.nan, np.nansum([np.nan]) = 0
     if min_count is None:
-        if nax < by_.ndim or fill_value is not None:
+        if nax < by_.ndim or (fill_value is not None and provided_expected):
             min_count = 1
 
     # TODO: set in xarray?
-    if min_count is not None and func in ["nansum", "nanprod"] and fill_value is None:
+    if (
+        min_count is not None
+        and min_count > 0
+        and func in ["nansum", "nanprod"]
+        and fill_value is None
+    ):
         # nansum, nanprod have fill_value=0, 1
         # overwrite than when min_count is set
         fill_value = np.nan
@@ -1909,12 +1916,6 @@ def groupby_reduce(
 
     groups: tuple[np.ndarray | DaskArray, ...]
     if not has_dask:
-        if min_count == 1:
-            # optimize for pure numpy groupby
-            # We set the fill_value appropriately anyway
-            agg.min_count = None
-            agg.numpy = agg.numpy[:-1]
-
         results = _reduce_blockwise(
             array, by_, agg, expected_groups=expected_groups, reindex=reindex, sort=sort, **kwargs
         )
