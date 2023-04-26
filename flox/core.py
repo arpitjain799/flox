@@ -1904,10 +1904,17 @@ def groupby_reduce(
         fill_value = np.nan
 
     kwargs = dict(axis=axis_, fill_value=fill_value, engine=engine)
+
     agg = _initialize_aggregation(func, dtype, array.dtype, fill_value, min_count, finalize_kwargs)
 
     groups: tuple[np.ndarray | DaskArray, ...]
     if not has_dask:
+        if min_count == 1:
+            # optimize for pure numpy groupby
+            # We set the fill_value appropriately anyway
+            agg.min_count = None
+            agg.numpy = agg.numpy[:-1]
+
         results = _reduce_blockwise(
             array, by_, agg, expected_groups=expected_groups, reindex=reindex, sort=sort, **kwargs
         )
